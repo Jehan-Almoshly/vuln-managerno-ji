@@ -7,14 +7,7 @@ import { cn } from "@/lib/utils";
 
 const filterTags = [
   "Open vulnerabilities",
-  "Adversaries",
-  "Asset confidence",
-  "Asset criticality",
-  "Asset roles",
   "CISA KEV",
-  "CISA KEV due date compliant",
-  "Cloud provider",
-  "CVSS complexity",
 ];
 
 type SeverityKey = "Critical" | "High" | "Medium" | "Low" | "Info" | "None";
@@ -89,9 +82,16 @@ const VulnerabilitiesTab = () => {
   const [filterRating, setFilterRating] = useState("all");
   const [filterExploit, setFilterExploit] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
+  const [selectedTags, setSelectedTags] = useState<string[]>(["Open vulnerabilities"]);
   const [showRatingDrop, setShowRatingDrop] = useState(false);
   const [showExploitDrop, setShowExploitDrop] = useState(false);
   const [showStatusDrop, setShowStatusDrop] = useState(false);
+
+  const toggleTag = (tag: string) => {
+    setSelectedTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+  };
 
   const { data: vulnerabilities = [] } = useQuery({
     queryKey: ["vulnerabilities"],
@@ -147,6 +147,14 @@ const VulnerabilitiesTab = () => {
     if (filterRating !== "all" && v.cvss_severity !== filterRating) return false;
     if (filterExploit !== "all" && v.exploit_status !== filterExploit) return false;
     if (filterStatus !== "all" && v.status !== filterStatus) return false;
+
+    // Apply tag filters
+    if (selectedTags.includes("Open vulnerabilities") && v.status !== "Open") return false;
+    
+    // Logic for CISA KEV - typically these are critical/high exploits. 
+    // Since we don't have a direct flag, we use 'Actively Used' as a proxy for this academic version.
+    if (selectedTags.includes("CISA KEV") && v.exploit_status !== "Actively Used") return false;
+
     return true;
   });
 
@@ -263,20 +271,31 @@ const VulnerabilitiesTab = () => {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 mb-2">
-          {filterTags.map((tag, i) => (
-            <span key={i} className="text-xs px-2 py-1 rounded text-muted-foreground">
-              {tag}
-              {i === 2 && (
-                <span className="ml-1 px-1.5 py-0.5 rounded-full bg-severity-high/20 text-severity-high text-xs">
-                  1 excluded
-                </span>
-              )}
-            </span>
-          ))}
-          <span className="text-xs text-primary cursor-pointer">Add/remove filters</span>
+          {filterTags.map((tag, i) => {
+            const isActive = selectedTags.includes(tag);
+            return (
+              <button
+                key={i}
+                onClick={() => toggleTag(tag)}
+                className={cn(
+                  "text-xs px-2 py-1 rounded transition-colors",
+                  isActive
+                    ? "bg-primary/20 text-primary font-medium border border-primary/30"
+                    : "text-muted-foreground hover:bg-secondary border border-transparent"
+                )}
+              >
+                {tag}
+              </button>
+            );
+          })}
         </div>
         <div className="text-right">
-          <span className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">Clear all</span>
+          <button
+            onClick={() => setSelectedTags([])}
+            className="text-xs text-muted-foreground cursor-pointer hover:text-foreground"
+          >
+            Clear all
+          </button>
         </div>
       </div>
 
@@ -286,6 +305,7 @@ const VulnerabilitiesTab = () => {
           <thead>
             <tr className="border-b border-border bg-secondary/30">
               <th className="text-left px-5 py-3 text-xs font-bold text-primary uppercase tracking-wider">CVE</th>
+              <th className="text-left px-5 py-3 text-xs font-bold text-primary uppercase tracking-wider">Scan Name</th>
               <th className="text-left px-5 py-3 text-xs font-bold text-primary uppercase tracking-wider">Exprt Rating</th>
               <th className="text-left px-5 py-3 text-xs font-bold text-primary uppercase tracking-wider">CVSS Severity</th>
               <th className="text-left px-5 py-3 text-xs font-bold text-primary uppercase tracking-wider">Description</th>
@@ -317,6 +337,11 @@ const VulnerabilitiesTab = () => {
                         {v.cve_id ?? "—"}
                       </span>
                     </div>
+                  </td>
+                  <td className="px-5 py-3.5">
+                    <span className="text-foreground/80 font-medium truncate max-w-[150px] block">
+                      {v.scan_names ? v.scan_names.split(', ')[0] : "—"}
+                    </span>
                   </td>
                   <td className="px-5 py-3.5">
                     <SeverityCell value={v.exprt_rating} />
