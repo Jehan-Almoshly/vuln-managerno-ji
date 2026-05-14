@@ -1,64 +1,84 @@
 -- =============================================================
--- Dashboard User Isolation & Security Hardening (BULLETPROOF VERSION)
+-- Final Permissions & Isolation Fix
 -- =============================================================
--- This migration ensures absolute isolation between admin accounts
--- by injecting auth.uid() filters directly into the views and 
--- converting legacy tables into security-aware views.
+-- This migration ensures "Security Users" see data from the Admin 
+-- who invited them, maintaining isolation between different Admins.
 -- =============================================================
 
 BEGIN;
 
--- 0. Drop Legacy Tables to allow View creation
-DROP VIEW IF EXISTS public.vuln_rating_overview_filtered CASCADE;
-DROP VIEW IF EXISTS public.remediation_open_filtered CASCADE;
-DROP VIEW IF EXISTS public.vuln_top_assets CASCADE;
-DROP VIEW IF EXISTS public.vuln_by_tool CASCADE;
-DROP VIEW IF EXISTS public.vuln_risk_score CASCADE;
-DROP VIEW IF EXISTS public.vuln_daily_open CASCADE;
-DROP VIEW IF EXISTS public.remediation_closed CASCADE;
-DROP VIEW IF EXISTS public.vuln_status_overview CASCADE;
-DROP VIEW IF EXISTS public.vulnerabilities CASCADE;
-DROP VIEW IF EXISTS public.scanned_assets CASCADE;
-DROP VIEW IF EXISTS public.dash_kpi_mttr CASCADE;
-DROP VIEW IF EXISTS public.dash_kpi_weaponized CASCADE;
-DROP VIEW IF EXISTS public.dash_kpi_compliance CASCADE;
+-- 1. Helper Function: Get Inviter ID
+-- =============================================================
+CREATE OR REPLACE FUNCTION public.get_inviter_id(target_user_id uuid)
+RETURNS uuid LANGUAGE sql SECURITY DEFINER SET search_path = public
+AS $$
+  SELECT il.created_by
+  FROM public.invitation_usages iu
+  JOIN public.invitation_links il ON iu.invitation_id = il.id
+  WHERE iu.user_id = target_user_id
+  LIMIT 1;
+$$;
 
-DROP TABLE IF EXISTS public.vuln_rating_overview CASCADE;
-DROP TABLE IF EXISTS public.vuln_top_assets CASCADE;
-DROP TABLE IF EXISTS public.vuln_by_tool CASCADE;
-DROP TABLE IF EXISTS public.vuln_risk_score CASCADE;
-DROP TABLE IF EXISTS public.vuln_daily_open CASCADE;
-DROP TABLE IF EXISTS public.remediation_open CASCADE;
-DROP TABLE IF EXISTS public.remediation_closed CASCADE;
-DROP TABLE IF EXISTS public.vuln_status_overview CASCADE;
-DROP TABLE IF EXISTS public.vulnerabilities CASCADE;
-DROP TABLE IF EXISTS public.scanned_assets CASCADE;
+-- 2. Refactor RLS Policies
+-- =============================================================
 
--- 1. Tables: Forced Isolation & Policy Cleanup
-ALTER TABLE public.scan_results ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.scan_results FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.scan_findings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.scan_findings FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.finding_cves ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.finding_cves FORCE ROW LEVEL SECURITY;
+-- Table: scan_results
+DROP POLICY IF EXISTS "scan_results_isolation" ON public.scan_results;
+DROP POLICY IF EXISTS "scan_results_select" ON public.scan_results;
+DROP POLICY IF EXISTS "scan_results_select_v2" ON public.scan_results;
+DROP POLICY IF EXISTS "scan_results_admin" ON public.scan_results;
+DROP POLICY IF EXISTS "scan_results_manage" ON public.scan_results;
 
-DO $$ 
-DECLARE 
-    t text;
-    pol record;
-BEGIN 
-    FOR t IN SELECT unnest(ARRAY['scan_results', 'scan_findings', 'finding_cves']) LOOP
-        FOR pol IN SELECT policyname FROM pg_policies WHERE tablename = t AND schemaname = 'public' LOOP
-            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, t);
-        END LOOP;
-    END LOOP;
-END $$;
+CREATE POLICY "scan_results_select" ON public.scan_results 
+FOR SELECT TO authenticated 
+USING (
+  user_id = auth.uid() OR 
+  user_id = public.get_inviter_id(auth.uid())
+);
 
-CREATE POLICY "scan_results_isolation" ON public.scan_results FOR ALL TO authenticated USING (user_id = auth.uid());
-CREATE POLICY "scan_findings_isolation" ON public.scan_findings FOR ALL TO authenticated USING (EXISTS (SELECT 1 FROM public.scan_results sr WHERE sr.id = scan_id AND sr.user_id = auth.uid()));
-CREATE POLICY "finding_cves_isolation" ON public.finding_cves FOR ALL TO authenticated USING (EXISTS (SELECT 1 FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.id = finding_id AND sr.user_id = auth.uid()));
+CREATE POLICY "scan_results_manage" ON public.scan_results 
+FOR ALL TO authenticated 
+USING (public.has_role(auth.uid(), 'admin') AND user_id = auth.uid())
+WITH CHECK (public.has_role(auth.uid(), 'admin') AND user_id = auth.uid());
 
--- 2. Redefine Views with EXPLICIT User Filtering
+
+-- Table: scan_findings (Inherits via scan_id)
+DROP POLICY IF EXISTS "scan_findings_isolation" ON public.scan_findings;
+DROP POLICY IF EXISTS "scan_findings_select" ON public.scan_findings;
+DROP POLICY IF EXISTS "scan_findings_admin" ON public.scan_findings;
+DROP POLICY IF EXISTS "scan_findings_manage" ON public.scan_findings;
+
+CREATE POLICY "scan_findings_select" ON public.scan_findings 
+FOR SELECT TO authenticated 
+USING (
+  EXISTS (SELECT 1 FROM public.scan_results sr WHERE sr.id = scan_id)
+);
+
+CREATE POLICY "scan_findings_manage" ON public.scan_findings 
+FOR ALL TO authenticated 
+USING (public.has_role(auth.uid(), 'admin'))
+WITH CHECK (public.has_role(auth.uid(), 'admin'));
+
+
+-- Table: finding_cves (Inherits via finding_id)
+DROP POLICY IF EXISTS "finding_cves_isolation" ON public.finding_cves;
+DROP POLICY IF EXISTS "finding_cves_select" ON public.finding_cves;
+DROP POLICY IF EXISTS "finding_cves_admin" ON public.finding_cves;
+DROP POLICY IF EXISTS "finding_cves_manage" ON public.finding_cves;
+
+CREATE POLICY "finding_cves_select" ON public.finding_cves 
+FOR SELECT TO authenticated 
+USING (
+  EXISTS (SELECT 1 FROM public.scan_findings f WHERE f.id = finding_id)
+);
+
+CREATE POLICY "finding_cves_manage" ON public.finding_cves 
+FOR ALL TO authenticated 
+USING (public.has_role(auth.uid(), 'admin'))
+WITH CHECK (public.has_role(auth.uid(), 'admin'));
+
+
+-- 3. Redefine Views as CLEAN Security Invoker Views
 -- =============================================================
 
 CREATE OR REPLACE VIEW public.vuln_rating_overview_filtered WITH (security_invoker = true) AS
@@ -74,7 +94,7 @@ WITH deduped_findings AS (
   JOIN public.scan_results sr ON sr.id = f.scan_id
   LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id
   LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id
-  WHERE f.status = 'open' AND sr.user_id = auth.uid()
+  WHERE f.status = 'open'
   GROUP BY f.id, f.target
 )
 SELECT md5(COALESCE(target, 'all') || rating)::uuid as id, target, rating as label, COUNT(*)::int as value,
@@ -89,7 +109,7 @@ WITH asset_risk AS (
   JOIN public.scan_results sr ON sr.id = f.scan_id
   LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id
   LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id
-  WHERE f.status = 'open' AND sr.user_id = auth.uid() AND UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) IN ('CRITICAL', 'HIGH')
+  WHERE f.status = 'open' AND UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) IN ('CRITICAL', 'HIGH')
   GROUP BY f.target
 )
 SELECT md5(target)::uuid as id, target as label, risk_count::int as value, 'hsl(0 84% 60%)' as color, 1 as sort_order
@@ -99,7 +119,7 @@ CREATE OR REPLACE VIEW public.vuln_by_tool WITH (security_invoker = true) AS
 SELECT md5(COALESCE(f.target, 'all') || f.tool)::uuid as id, f.target, f.tool as label, COUNT(DISTINCT f.id)::int as value,
   CASE WHEN f.tool = 'NMAP' THEN 'hsl(210 70% 55%)' WHEN f.tool = 'NIKTO' THEN 'hsl(280 65% 60%)' WHEN f.tool = 'SQLMAP' THEN 'hsl(340 75% 55%)' WHEN f.tool = 'FFUF' THEN 'hsl(160 60% 45%)' ELSE 'hsl(210 15% 55%)' END as color, 1 as sort_order
 FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id
-WHERE f.status = 'open' AND sr.user_id = auth.uid() GROUP BY f.target, f.tool;
+WHERE f.status = 'open' GROUP BY f.target, f.tool;
 
 CREATE OR REPLACE VIEW public.vuln_risk_score WITH (security_invoker = true) AS
 WITH finding_factors AS (
@@ -107,7 +127,7 @@ WITH finding_factors AS (
     CASE WHEN EXISTS (SELECT 1 FROM public.finding_cves fc JOIN public.exploits e ON e.cve_id = fc.cve_id WHERE fc.finding_id = f.id AND e.verified IS TRUE) THEN 1.8 WHEN EXISTS (SELECT 1 FROM public.finding_cves fc JOIN public.exploits e ON e.cve_id = fc.cve_id WHERE fc.finding_id = f.id) THEN 1.4 ELSE 1.0 END AS exploit_factor,
     CASE WHEN f.service ~* '(postgres|mysql|sql|oracle|db|mongodb|redis|auth|ldap|ad|kerberos|pax)' THEN 1.5 ELSE 1.0 END AS criticality_factor,
     CASE WHEN f.service ~* '(http|https|ssh|rdp|vnc|ftp|smtp)' THEN 1.2 ELSE 1.0 END AS exposure_factor
-  FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.status = 'open' AND sr.user_id = auth.uid()
+  FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.status = 'open'
 ),
 scored_findings AS (
   SELECT target, base_score, (base_score * exploit_factor) - base_score AS exploit_impact, (base_score * exploit_factor * criticality_factor) - (base_score * exploit_factor) AS asset_impact, (base_score * exploit_factor * criticality_factor * exposure_factor) - (base_score * exploit_factor * criticality_factor) AS exposure_impact FROM finding_factors
@@ -121,40 +141,40 @@ SELECT md5(COALESCE(target, 'all') || label)::uuid AS id, target, label, ROUND(A
 
 CREATE OR REPLACE VIEW public.vuln_daily_open WITH (security_invoker = true) AS
 WITH RECURSIVE days AS ( SELECT (CURRENT_DATE - INTERVAL '44 days')::DATE AS day_date, 1 AS day_num UNION ALL SELECT (day_date + INTERVAL '1 day')::DATE, day_num + 1 FROM days WHERE day_num < 45 ),
-targets AS ( SELECT DISTINCT f.target FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE sr.user_id = auth.uid() )
+targets AS ( SELECT DISTINCT f.target FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id )
 SELECT md5(d.day_date::text || COALESCE(t.target, 'all'))::uuid AS id, t.target, d.day_num AS day, COUNT(DISTINCT f.id)::int AS count
-FROM days d CROSS JOIN targets t LEFT JOIN public.scan_findings f ON f.created_at::date <= d.day_date AND f.target = t.target AND (f.status = 'open' OR (f.status IN ('fixed', 'resolved', 'closed', 'false_positive') AND EXISTS (SELECT 1 FROM public.scan_results sr WHERE sr.id = f.scan_id AND sr.user_id = auth.uid() AND (sr.completed_at::date > d.day_date OR sr.completed_at IS NULL))))
+FROM days d CROSS JOIN targets t LEFT JOIN public.scan_findings f ON f.created_at::date <= d.day_date AND f.target = t.target AND (f.status = 'open' OR (f.status IN ('fixed', 'resolved', 'closed', 'false_positive') AND EXISTS (SELECT 1 FROM public.scan_results sr WHERE sr.id = f.scan_id AND (sr.completed_at::date > d.day_date OR sr.completed_at IS NULL))))
 GROUP BY d.day_date, d.day_num, t.target;
 
 CREATE OR REPLACE VIEW public.dash_kpi_mttr WITH (security_invoker = true) AS 
 SELECT md5(COALESCE(f.target, 'all'))::uuid as id, f.target, 'MTTR' AS label, COALESCE(ROUND(AVG(EXTRACT(EPOCH FROM (sr.completed_at - f.created_at)) / 86400)), 0)::int AS value, 'Days' AS unit, 'hsl(190 65% 58%)' AS color 
-FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.status IN ('fixed', 'resolved', 'closed') AND sr.completed_at IS NOT NULL AND sr.user_id = auth.uid() GROUP BY f.target;
+FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.status IN ('fixed', 'resolved', 'closed') AND sr.completed_at IS NOT NULL GROUP BY f.target;
 
 CREATE OR REPLACE VIEW public.dash_kpi_weaponized WITH (security_invoker = true) AS 
 SELECT md5(COALESCE(f.target, 'all'))::uuid as id, f.target, 'Weaponized' AS label, COUNT(DISTINCT f.id)::int AS value, 'Risks' AS unit, 'hsl(355 70% 62%)' AS color 
-FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.status = 'open' AND sr.user_id = auth.uid() AND EXISTS ( SELECT 1 FROM public.finding_cves fc JOIN public.exploits e ON e.cve_id = fc.cve_id WHERE fc.finding_id = f.id AND e.verified IS TRUE ) GROUP BY f.target;
+FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE f.status = 'open' AND EXISTS ( SELECT 1 FROM public.finding_cves fc JOIN public.exploits e ON e.cve_id = fc.cve_id WHERE fc.finding_id = f.id AND e.verified IS TRUE ) GROUP BY f.target;
 
 CREATE OR REPLACE VIEW public.dash_kpi_compliance WITH (security_invoker = true) AS 
-WITH finding_sla AS ( SELECT f.id, f.target, f.created_at, CASE WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'CRITICAL') THEN 7 WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'HIGH') THEN 30 WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'MEDIUM') THEN 90 ELSE 180 END as allowed_days FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id WHERE f.status = 'open' AND sr.user_id = auth.uid() GROUP BY f.id, f.target, f.created_at )
+WITH finding_sla AS ( SELECT f.id, f.target, f.created_at, CASE WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'CRITICAL') THEN 7 WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'HIGH') THEN 30 WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'MEDIUM') THEN 90 ELSE 180 END as allowed_days FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id WHERE f.status = 'open' GROUP BY f.id, f.target, f.created_at )
 SELECT md5(COALESCE(target, 'all'))::uuid as id, target, 'Compliance' as label, CASE WHEN COUNT(*) = 0 THEN 100 ELSE ROUND((COUNT(*) FILTER (WHERE (now() - created_at) <= (allowed_days * interval '1 day'))::float / COUNT(*)::float) * 100)::int END as value, '%' as unit, 'hsl(155 50% 55%)' as color FROM finding_sla GROUP BY target;
 
 CREATE OR REPLACE VIEW public.remediation_open_filtered WITH (security_invoker = true) AS 
 WITH sev_levels(rating, color, sort_order, allowed_days) AS ( VALUES ('Critical', 'hsl(0 84% 60%)', 1, 7), ('High', 'hsl(24 95% 53%)', 2, 30), ('Medium', 'hsl(45 93% 47%)', 3, 90), ('Low', 'hsl(142 71% 45%)', 4, 180) ), 
-targets AS ( SELECT DISTINCT f.target FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE sr.user_id = auth.uid() ),
-finding_info AS ( SELECT f.id, f.target, f.created_at, CASE WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'CRITICAL') THEN 'Critical' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'HIGH') THEN 'High' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'MEDIUM') THEN 'Medium' ELSE 'Low' END as sev FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id WHERE f.status = 'open' AND sr.user_id = auth.uid() GROUP BY f.id, f.target, f.created_at )
+targets AS ( SELECT DISTINCT f.target FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id ),
+finding_info AS ( SELECT f.id, f.target, f.created_at, CASE WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'CRITICAL') THEN 'Critical' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'HIGH') THEN 'High' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'MEDIUM') THEN 'Medium' ELSE 'Low' END as sev FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id WHERE f.status = 'open' GROUP BY f.id, f.target, f.created_at )
 SELECT md5(COALESCE(t.target, 'all') || sl.rating)::uuid AS id, t.target, sl.rating, sl.color, 'last_30_days' AS time_frame, COUNT(f.id)::int as total_count, COUNT(f.id) FILTER (WHERE (now() - f.created_at) <= (sl.allowed_days * interval '1 day'))::int as in_comp_count, sl.sort_order 
 FROM sev_levels sl CROSS JOIN targets t LEFT JOIN finding_info f ON f.sev = sl.rating AND f.target = t.target GROUP BY t.target, sl.rating, sl.color, sl.sort_order, sl.allowed_days;
 
 CREATE OR REPLACE VIEW public.remediation_closed WITH (security_invoker = true) AS 
 WITH sev_levels(rating, color, sort_order, allowed_days) AS ( VALUES ('Critical', 'hsl(142 71% 45%)', 1, 7), ('High', 'hsl(142 71% 45%)', 2, 30), ('Medium', 'hsl(142 71% 45%)', 3, 90), ('Low', 'hsl(142 71% 45%)', 4, 180) ), 
-targets AS ( SELECT DISTINCT f.target FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE sr.user_id = auth.uid() ),
-finding_info AS ( SELECT f.id, f.target, f.created_at, sr.completed_at, CASE WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'CRITICAL') THEN 'Critical' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'HIGH') THEN 'High' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'MEDIUM') THEN 'Medium' ELSE 'Low' END as sev FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id WHERE f.status IN ('fixed', 'resolved', 'closed') AND sr.user_id = auth.uid() GROUP BY f.id, f.target, f.created_at, sr.completed_at )
+targets AS ( SELECT DISTINCT f.target FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id ),
+finding_info AS ( SELECT f.id, f.target, f.created_at, sr.completed_at, CASE WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'CRITICAL') THEN 'Critical' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'HIGH') THEN 'High' WHEN bool_or(UPPER(COALESCE(c.cvss_v3_severity, 'MEDIUM')) = 'MEDIUM') THEN 'Medium' ELSE 'Low' END as sev FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id LEFT JOIN public.finding_cves fc ON fc.finding_id = f.id LEFT JOIN public.cve_catalog c ON c.cve_id = fc.cve_id WHERE f.status IN ('fixed', 'resolved', 'closed') GROUP BY f.id, f.target, f.created_at, sr.completed_at )
 SELECT md5(COALESCE(t.target, 'all') || sl.rating || 'closed')::uuid AS id, t.target, sl.rating, sl.color, 'last_30_days' AS time_frame, COUNT(f.id)::int as total_count, COUNT(f.id) FILTER (WHERE (f.completed_at - f.created_at) <= (sl.allowed_days * interval '1 day'))::int as in_comp_count, sl.sort_order 
 FROM sev_levels sl CROSS JOIN targets t LEFT JOIN finding_info f ON f.sev = sl.rating AND f.target = t.target GROUP BY t.target, sl.rating, sl.color, sl.sort_order, sl.allowed_days;
 
 CREATE OR REPLACE VIEW public.vuln_status_overview WITH (security_invoker = true) AS
 SELECT md5(COALESCE(f.target, 'all') || f.status)::uuid AS id, f.target, f.status as label, COUNT(DISTINCT f.id)::int AS value
-FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id WHERE sr.user_id = auth.uid() GROUP BY f.target, f.status;
+FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id GROUP BY f.target, f.status;
 
 CREATE OR REPLACE VIEW public.vulnerabilities WITH (security_invoker = true) AS
 WITH cve_findings AS ( 
@@ -169,7 +189,6 @@ WITH cve_findings AS (
     FROM public.finding_cves fc 
     JOIN public.scan_findings f ON f.id = fc.finding_id 
     JOIN public.scan_results sr ON sr.id = f.scan_id 
-    WHERE sr.user_id = auth.uid() 
     GROUP BY fc.cve_id 
 ),
 cve_exploits AS ( 
@@ -197,13 +216,46 @@ FROM public.cve_catalog c
 JOIN cve_findings cf ON cf.cve_id = c.cve_id 
 LEFT JOIN cve_exploits ce ON TRIM(ce.cve_id) = TRIM(c.cve_id);
 
+CREATE OR REPLACE VIEW public.asset_chart_severity WITH (security_invoker = true) AS
+SELECT CASE UPPER(COALESCE(f.severity, 'info')) WHEN 'CRITICAL' THEN 'Critical' WHEN 'HIGH' THEN 'High' WHEN 'MEDIUM' THEN 'Medium' WHEN 'LOW' THEN 'Low' ELSE 'Info' END AS segment_name, COUNT(*)::int AS segment_value
+FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id GROUP BY 1;
+
+CREATE OR REPLACE VIEW public.asset_chart_by_tool WITH (security_invoker = true) AS
+SELECT CASE UPPER(COALESCE(f.tool, 'other')) WHEN 'NMAP' THEN 'Nmap' WHEN 'NIKTO' THEN 'Nikto' WHEN 'SQLMAP' THEN 'SQLMap' WHEN 'FFUF' THEN 'FFUF' ELSE 'Other' END AS segment_name, COUNT(*)::int AS segment_value
+FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id GROUP BY 1;
+
+CREATE OR REPLACE VIEW public.asset_chart_exposure WITH (security_invoker = true) AS
+WITH classified AS (
+  SELECT DISTINCT ON (target) target,
+    CASE WHEN target ~* '^https?://' THEN 'Web Application' WHEN target ~* '^[a-zA-Z].*\.[a-zA-Z]{2,}' AND target !~ '^\d{1,3}\.' THEN 'Web Application' WHEN target ~ '^10\.' OR target ~ '^192\.168\.' OR target ~ '^172\.(1[6-9]|2[0-9]|3[01])\.' OR target ~ '^127\.' THEN 'Internal Host' WHEN target ~ '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}' THEN 'External Host' ELSE 'Network Service' END AS exposure_type
+  FROM public.scan_results ORDER BY target, created_at DESC
+)
+SELECT exposure_type AS segment_name, COUNT(*)::int AS segment_value FROM classified GROUP BY exposure_type;
+
+CREATE OR REPLACE VIEW public.asset_chart_exploitability WITH (security_invoker = true) AS
+WITH user_findings AS ( SELECT f.id FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id ),
+matched AS ( SELECT DISTINCT fc.cve_id, UPPER(COALESCE(c.cvss_v3_severity, 'NONE')) AS sev FROM public.finding_cves fc JOIN user_findings uf ON uf.id = fc.finding_id JOIN public.cve_catalog c ON c.cve_id = fc.cve_id ),
+with_exploits AS ( SELECT m.cve_id, m.sev, COUNT(e.cve_id) FILTER (WHERE e.verified IS TRUE) AS verified_count, COUNT(e.cve_id) AS total_exploits FROM matched m LEFT JOIN public.exploits e ON e.cve_id = m.cve_id GROUP BY m.cve_id, m.sev )
+SELECT CASE WHEN verified_count > 0 THEN 'Weaponized' WHEN total_exploits > 0 THEN 'Public PoC' WHEN sev IN ('CRITICAL','HIGH','MEDIUM') THEN 'Known CVE' ELSE 'Theoretical' END AS segment_name, COUNT(*)::int AS segment_value FROM with_exploits GROUP BY 1;
+
+CREATE OR REPLACE VIEW public.asset_chart_attack_vector WITH (security_invoker = true) AS
+WITH user_findings AS ( SELECT f.id FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id )
+SELECT CASE WHEN c.cvss_v3_vector ~* 'AV:N' THEN 'Network' WHEN c.cvss_v3_vector ~* 'AV:A' THEN 'Adjacent' WHEN c.cvss_v3_vector ~* 'AV:L' THEN 'Local' WHEN c.cvss_v3_vector ~* 'AV:P' THEN 'Physical' ELSE 'Unknown' END AS segment_name, COUNT(*)::int AS segment_value
+FROM public.finding_cves fc JOIN user_findings uf ON uf.id = fc.finding_id JOIN public.cve_catalog c ON c.cve_id = fc.cve_id GROUP BY 1;
+
+CREATE OR REPLACE VIEW public.asset_chart_status WITH (security_invoker = true) AS
+SELECT CASE LOWER(COALESCE(f.status, 'open')) WHEN 'open' THEN 'Open' WHEN 'triaged' THEN 'Triaged' WHEN 'in_progress' THEN 'Triaged' WHEN 'fixed' THEN 'Fixed' WHEN 'resolved' THEN 'Fixed' WHEN 'closed' THEN 'Fixed' WHEN 'false_positive' THEN 'False Positive' ELSE 'Open' END AS segment_name, COUNT(*)::int AS segment_value
+FROM public.scan_findings f JOIN public.scan_results sr ON sr.id = f.scan_id GROUP BY 1;
+
 CREATE OR REPLACE VIEW public.scanned_assets WITH (security_invoker = true) AS
-WITH latest_scans AS ( SELECT DISTINCT ON (target, tool) * FROM public.scan_results WHERE user_id = auth.uid() ORDER BY target, tool, COALESCE(completed_at, started_at, created_at) DESC ),
+WITH latest_scans AS ( SELECT DISTINCT ON (target, tool) * FROM public.scan_results ORDER BY target, tool, COALESCE(completed_at, started_at, created_at) DESC ),
 scan_ports AS ( SELECT f.scan_id, string_agg(DISTINCT substring(f.target from ':(\d+)'), ',') AS port_list FROM public.scan_findings f GROUP BY f.scan_id ),
 fallback_ports AS ( SELECT id, substring(target from ':(\d+)') AS port FROM public.scan_results WHERE target ~ ':\d+' )
 SELECT md5('asset|' || ls.target || '|' || COALESCE(ls.tool, 'none'))::uuid AS id, COALESCE(NULLIF(regexp_replace(ls.target, '^https?://', ''), ''), ls.target) AS ip_address, COALESCE(NULLIF(split_part(regexp_replace(ls.target, '^https?://', ''), '/', 1), ''), ls.target) AS hostname, 'unknown'::text AS os, UPPER(ls.tool) AS tool, COALESCE(NULLIF(sp.port_list, ''), NULLIF(fp.port, ''), CASE WHEN ls.target ~* '^https' THEN '443' WHEN ls.target ~* '^http' THEN '80' ELSE '' END) AS open_ports, CASE WHEN ls.critical_count > 0 THEN 'Critical' WHEN ls.high_count > 0 THEN 'High' WHEN ls.medium_count > 0 THEN 'Medium' WHEN ls.low_count > 0 THEN 'Low' ELSE 'Info' END AS risk, COALESCE(ls.completed_at, ls.started_at, ls.created_at) AS last_scan, ls.created_at AS created_at
 FROM latest_scans ls LEFT JOIN scan_ports sp ON sp.scan_id = ls.id LEFT JOIN fallback_ports fp ON fp.id = ls.id;
 
+-- 4. Final Permission Cleanup
+-- =============================================================
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated;
 
 COMMIT;
