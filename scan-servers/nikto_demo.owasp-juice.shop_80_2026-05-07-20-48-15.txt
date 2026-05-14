@@ -1,0 +1,9 @@
+- Nikto v2.6.0/
++ Target Host: demo.owasp-juice.shop
++ Target Port: 80
++ GET /: Retrieved via header: 1.1 heroku-router.
++ GET /: Retrieved access-control-allow-origin header: *.
++ GET /: Uncommon header(s) 'x-recruiting' found, with contents: /#/jobs.
++ GET /: Uncommon header(s) 'reporting-endpoints' found, with contents: heroku-nel="https://nel.heroku.com/reports?s=ZMB3afHMHRD1O9p6X5R0diNsZx0bdLS4pFQa2SQ67bo%3D&sid=812dcc77-0bd0-43b1-a5f1-b25750382959&ts=1778186904".
++ GET /robots.txt: contains 1 entry which should be manually viewed. See: https://developer.mozilla.org/en-US/docs/Glossary/Robots.txt: 
++ GET /: Server banner changed from 'Heroku' to 'Apache/2.4.67 (Unix)'.

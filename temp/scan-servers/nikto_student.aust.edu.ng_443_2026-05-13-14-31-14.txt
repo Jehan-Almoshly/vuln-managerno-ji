@@ -1,0 +1,19 @@
+- Nikto v2.6.0/
++ Target Host: student.aust.edu.ng
++ Target Port: 443
++ GET /: Retrieved x-powered-by header: Phusion Passenger 4.0.53.
++ GET /: Uncommon header(s) 'x-runtime' found, with contents: 21.
++ GET /: Cookie _fedena_session_ created without the secure flag. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies: 
++ SSL Info:           Subject:  /CN=student.aust.edu.ng
+                      CN:       student.aust.edu.ng
+                      SAN:      student.aust.edu.ng
+                      Ciphers:  ECDHE-RSA-AES256-GCM-SHA384
+                      Issuer:   /C=US/O=Let's Encrypt/CN=R12
++ GET /robots.txt: Server may leak inodes via ETags, header found with file /robots.txt, inode: 4393192, size: 25, mtime: Fri Oct 31 09:30:17 2014. See: CVE-2003-1418: 
++ GET /: The Content-Encoding header is set to "deflate" which may mean that the server is vulnerable to the BREACH attack. See: http://breachattack.com/: 
++ GET /: Suggested security header missing: referrer-policy. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy: 
++ GET /: Suggested security header missing: permissions-policy. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy: 
++ GET /: Suggested security header missing: x-content-type-options. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options: 
++ GET /: Suggested security header missing: strict-transport-security. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security: 
++ GET /: Suggested security header missing: content-security-policy. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP: 
++ HEAD Apache/2.2.22 appears to be outdated (current is at least 2.4.66).

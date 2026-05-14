@@ -555,6 +555,10 @@ export type Database = {
           status: string
           vulnerability_count: number
           scan_names: string | null
+<<<<<<< Updated upstream
+=======
+          scan_ids: string | null
+>>>>>>> Stashed changes
         }
         Insert: {
           created_at?: string

@@ -1,0 +1,16 @@
+- Nikto v2.6.0/
++ Target Host: demo.owasp-juice.shop
++ Target Port: 80
++ GET /: Retrieved via header: 1.1 heroku-router.
++ GET /: Retrieved access-control-allow-origin header: *.
++ GET /: Uncommon header(s) 'x-recruiting' found, with contents: /#/jobs.
++ GET /: Uncommon header(s) 'reporting-endpoints' found, with contents: heroku-nel="https://nel.heroku.com/reports?s=Jagyl8ocDm5Pkis%2FrfAwc6u2daRe6fUw2TFmx4j%2FrfE%3D&sid=812dcc77-0bd0-43b1-a5f1-b25750382959&ts=1778122581".
++ GET /robots.txt: contains 1 entry which should be manually viewed. See: https://developer.mozilla.org/en-US/docs/Glossary/Robots.txt: 
++ GET /: Server banner changed from 'Heroku' to 'Apache/2.4.67 (Unix)'.
++ GET /: Suggested security header missing: strict-transport-security. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security: 
++ GET /: Suggested security header missing: content-security-policy. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP: 
++ GET /: Suggested security header missing: referrer-policy. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy: 
++ GET /: Suggested security header missing: permissions-policy. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy: 
++ GET /.psql_history: This might be interesting.
++ GET /ftp/: This might be interesting.
++ GET /public/: This might be interesting.
